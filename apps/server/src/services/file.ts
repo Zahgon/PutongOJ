@@ -4,8 +4,7 @@ import type { QueryFilter } from '../types/mongo.ts'
 import path from 'node:path'
 import { Files } from '@putong-oj/db'
 import fse from 'fs-extra'
-import { createLogger } from '../utils/logger.ts'
-import userService from './user.ts'
+import { createLogger, findUserByUid } from '../nest/infra.ts'
 
 const logger = createLogger('server.file')
 const uploadDir = path.join(import.meta.dirname, '../../public/uploads')
@@ -150,7 +149,7 @@ export async function findFiles (
 export async function findAdminFiles (query: AdminFileListQuery) {
   let ownerFilter: Types.ObjectId | undefined
   if (query.uploader) {
-    const owner = await userService.getUser(query.uploader)
+    const owner = await findUserByUid(query.uploader)
     if (!owner) {
       return null
     }

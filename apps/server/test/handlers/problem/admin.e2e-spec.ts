@@ -1,0 +1,72 @@
+import { Problem } from '@putong-oj/db'
+import test from 'ava'
+import { agent, deploy, encryptData } from '../../e2e.ts'
+
+const request = agent()
+
+test.before('Login', async (t) => {
+  const login = await request
+    .post('/api/account/login')
+    .send({
+      username: 'admin',
+      password: await encryptData(deploy.adminInitPwd),
+    })
+
+  t.is(login.status, 200)
+})
+
+let createPid: number | null = null
+
+test.serial('create a new problem', async (t) => {
+  const create = await request
+    .post('/api/problem')
+    .send({
+      title: '比较大小',
+      description: '本题要求将输入的任意3个整数从小到大输出。',
+      input: '输入在一行中给出3个整数，其间以空格分隔。',
+      output: '在一行中将3个整数从小到大输出，其间以“-&gt;”相连。',
+      in: '4 2 8',
+      out: '2->4->8',
+    })
+
+  t.is(create.status, 200)
+
+  createPid = create.body.data.pid
+})
+
+test.serial('Update a problem', async (t) => {
+  const update = await request
+    .put(`/api/problem/${createPid}`)
+    .send({
+      title: '更新新建题目',
+      description: '应该可以更新成功吧',
+    })
+  t.is(update.status, 200)
+
+  const find = await request
+    .get(`/api/problem/${createPid}`)
+
+  t.is(find.status, 200)
+  t.is(find.body.data.title, '更新新建题目')
+  t.is(find.body.data.description, '应该可以更新成功吧')
+})
+
+test.serial('Delete a Problem', async (t) => {
+  const del = await request
+    .delete(`/api/problem/${createPid}`)
+  t.is(del.status, 200)
+
+  const find = await request
+    .get(`/api/problem/${createPid}`)
+
+  t.is(find.status, 200)
+  t.false(find.body.success)
+  t.is(find.body.code, 404)
+
+  const deletedProblem = await Problem.findOne({ pid: createPid }).select('deletedAt').lean()
+  t.truthy(deletedProblem?.deletedAt)
+
+  const list = await request.get('/api/problem?page=-1')
+  t.is(list.status, 200)
+  t.false(list.body.data.list.docs.some((problem: { pid: number }) => problem.pid === createPid))
+})

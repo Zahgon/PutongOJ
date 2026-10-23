@@ -15,6 +15,8 @@
     "typecheck": "tsc --noEmit --skipLibCheck"
   },
   "dependencies": {
+    "@nestjs/common": "catalog:",
+    "@nestjs/core": "catalog:",
     "@putong-oj/db": "workspace:*",
     "@putong-oj/shared": "workspace:*",
     "cross-env": "catalog:",
@@ -22,6 +24,8 @@
     "fs-extra": "catalog:",
     "ioredis": "catalog:",
     "pino": "catalog:",
+    "reflect-metadata": "catalog:",
+    "rxjs": "catalog:",
     "zod": "catalog:"
   },
   "devDependencies": {

@@ -1,0 +1,361 @@
+import type { CourseDocument, Types } from '@putong-oj/db'
+import type { ContestModel, ContestParticipationManageableStatus, ContestParticipationModel, ContestRanklist, ContestRanklistProblem, UserModel } from '@putong-oj/shared'
+import type { PaginateOption, SortOption } from '../types/index.ts'
+import type { QueryFilter } from '../types/mongo.ts'
+import { Injectable } from '@nestjs/common'
+import { Contest, ContestParticipation, Problem, Solution, User } from '@putong-oj/db'
+import { JudgeStatus, ParticipationStatus } from '@putong-oj/shared'
+import escapeRegExp from 'lodash/escapeRegExp.js'
+import { CacheKey, CacheService, decorate, injectCtor } from './infra.ts'
+
+type ContestCreateDto = Pick<ContestModel,
+  'title' | 'startsAt' | 'endsAt' | 'isHidden' | 'isPublic' | 'course'>
+
+export type ContestProblemsWithStats = {
+  index: number
+  problemId: number
+  title: string
+  submit: number
+  solve: number
+}[]
+
+const ignoredJudges = [ JudgeStatus.CompileError, JudgeStatus.SystemError, JudgeStatus.Skipped ] as number[]
+const pendingJudges = [ JudgeStatus.Pending, JudgeStatus.RejudgePending, JudgeStatus.RunningJudge ] as number[]
+
+// services/contest.ts as a provider: contest documents, participations and the cached problem statistics and
+// ranklists.
+export class ContestService {
+  cache: CacheService
+
+  constructor (cache: CacheService) {
+    this.cache = cache
+  }
+
+  async findContests (
+    options: PaginateOption & SortOption,
+    filters: QueryFilter<ContestModel>,
+  ) {
+    const { page, pageSize, sort, sortBy } = options
+    const fields = [
+      '_id', 'contestId', 'title', 'startsAt', 'endsAt',
+      'isHidden', 'isLocked', 'isPublic', 'course', 'createdAt', 'updatedAt',
+    ]
+    const docsPromise = Contest
+      .find(filters)
+      .sort({
+        [sortBy]: sort,
+        ...(sortBy !== 'createdAt' ? { createdAt: -1 } : {}),
+      })
+      .skip((page - 1) * pageSize)
+      .limit(pageSize)
+      .select(fields)
+      .populate<{ course: Pick<CourseDocument, '_id' | 'name'> | null }>('course', { name: 1 })
+      .lean()
+    const countPromise = Contest.countDocuments(filters)
+
+    const [ rawDocs, count ] = await Promise.all([ docsPromise, countPromise ])
+    const docs = rawDocs.map(doc => ({
+      ...doc,
+      course: doc.course
+        ? { id: doc.course._id.toString(), name: doc.course.name }
+        : null,
+    }))
+    const result = {
+      docs,
+      limit: pageSize,
+      page,
+      pages: Math.ceil(count / pageSize),
+      total: count,
+    }
+    return result
+  }
+
+  async getContest (contestId: number) {
+    const contest = await Contest
+      .findOne({ contestId })
+      .populate<{ course: CourseDocument }>('course')
+    return contest
+  }
+
+  async createContest (contest: ContestCreateDto) {
+    const createdContest = new Contest(contest)
+    await createdContest.save()
+    return createdContest.toObject()
+  }
+
+  async updateContest (
+    contestId: number,
+    update: Partial<ContestModel>,
+  ): Promise<boolean> {
+    const res = await Contest.updateOne(
+      { contestId },
+      { $set: update },
+    )
+    return res.modifiedCount > 0
+  }
+
+  async getParticipation (user: Types.ObjectId, contest: Types.ObjectId): Promise<ParticipationStatus> {
+    const participation = await ContestParticipation
+      .findOne({ user, contest })
+      .lean()
+    if (!participation) {
+      return ParticipationStatus.NotApplied
+    }
+    return participation.status as ParticipationStatus
+  }
+
+  async updateParticipation (
+    user: Types.ObjectId,
+    contest: Types.ObjectId,
+    status: ParticipationStatus,
+  ): Promise<void> {
+    await ContestParticipation.findOneAndUpdate(
+      { user, contest },
+      { user, contest, status },
+      { upsert: true, returnDocument: 'after' },
+    )
+  }
+
+  async findParticipants (
+    contest: Types.ObjectId,
+    options: PaginateOption & SortOption,
+    filters: { user?: string, status?: ContestParticipationManageableStatus },
+  ) {
+    const { page, pageSize, sort, sortBy } = options
+    const queryFilters: QueryFilter<ContestParticipationModel>[] = [ { contest } ]
+
+    if (filters.status !== undefined) {
+      queryFilters.push({ status: filters.status })
+    }
+
+    if (filters.user) {
+      const keyword = new RegExp(escapeRegExp(filters.user), 'i')
+      const matchedUsers = await ContestParticipation
+        .aggregate<{ user: Types.ObjectId }>([ {
+          $match: {
+            contest,
+            ...(filters.status !== undefined ? { status: filters.status } : {}),
+          },
+        }, {
+          $lookup: {
+            from: User.collection.name,
+            localField: 'user',
+            foreignField: '_id',
+            as: 'userDoc',
+          },
+        }, {
+          $unwind: '$userDoc',
+        }, {
+          $match: {
+            $or: [
+              { 'userDoc.uid': { $regex: keyword } },
+              { 'userDoc.nick': { $regex: keyword } },
+            ],
+          },
+        }, {
+          $project: { _id: 0, user: 1 },
+        } ])
+
+      if (matchedUsers.length === 0) {
+        return { docs: [], limit: pageSize, page, pages: 0, total: 0 }
+      }
+
+      queryFilters.push({ user: { $in: matchedUsers.map(doc => doc.user) } })
+    }
+
+    const filter = { $and: queryFilters }
+    const [ docs, count ] = await Promise.all([
+      ContestParticipation.find(filter)
+        .sort({
+          [sortBy]: sort,
+          ...(sortBy !== 'updatedAt' ? { updatedAt: -1 } : {}),
+        })
+        .skip((page - 1) * pageSize)
+        .limit(pageSize)
+        .select({ _id: 0, user: 1, status: 1, createdAt: 1, updatedAt: 1 })
+        .populate<{ user: Pick<UserModel, 'uid' | 'nick'> }>('user', { uid: 1, nick: 1 })
+        .lean(),
+      ContestParticipation.countDocuments(filter),
+    ])
+
+    return {
+      docs: docs.map(({ user, status, createdAt, updatedAt }) => ({
+        username: user.uid, nickname: user.nick,
+        status, createdAt, updatedAt,
+      })),
+      limit: pageSize,
+      page,
+      pages: Math.ceil(count / pageSize),
+      total: count,
+    }
+  }
+
+  async updateParticipantStatus (
+    user: Types.ObjectId,
+    contest: Types.ObjectId,
+    status: ContestParticipationManageableStatus,
+  ) {
+    const res = await ContestParticipation.updateOne(
+      { user, contest },
+      { $set: { status } },
+    )
+    return res.matchedCount > 0
+  }
+
+  isAllowedParticipant (
+    contest: ContestModel,
+    profile: { _id: Types.ObjectId, groups: Types.ObjectId[] },
+  ): boolean {
+    if (contest.allowedUsers.some(userId => userId.equals(profile._id))) {
+      return true
+    }
+    return profile.groups.some(userGroup =>
+      contest.allowedGroups.some(allowedGroup => allowedGroup.equals(userGroup)),
+    )
+  }
+
+  async getProblemsWithStats (contest: Types.ObjectId, isJury: boolean) {
+    return await this.cache.getOrCreate<ContestProblemsWithStats>(
+      CacheKey.contestProblems(contest, isJury),
+
+      async () => {
+        const contestDoc = await Contest
+          .findById(contest)
+          .select({ _id: 0, endsAt: 1, scoreboardFrozenAt: 1, problems: 1 })
+          .lean()
+        if (!contestDoc || contestDoc.problems.length === 0) {
+          return []
+        }
+
+        const problems = await Problem
+          .find({ _id: { $in: contestDoc.problems }, deletedAt: null })
+          .select({ _id: 1, pid: 1, title: 1 })
+          .lean()
+        const submissionCutoff = (contestDoc.scoreboardFrozenAt && !isJury)
+          ? contestDoc.scoreboardFrozenAt
+          : contestDoc.endsAt
+
+        return await Promise.all(problems.map(async ({ _id: problem, pid: problemId, title }) => {
+          const [ { length: submit }, { length: solve } ] = await Promise.all([
+            Solution.distinct('user', {
+              contest,
+              problem,
+              judge: { $nin: ignoredJudges },
+              createdAt: { $lt: submissionCutoff },
+            }).lean(),
+            Solution.distinct('user', {
+              contest,
+              problem,
+              judge: JudgeStatus.Accepted,
+              createdAt: { $lt: submissionCutoff },
+            }).lean(),
+          ])
+          const index = contestDoc.problems.findIndex(problemRef => problemRef.equals(problem)) + 1
+
+          return { index, problemId, title, submit, solve }
+        }))
+      },
+
+      10,
+    )
+  }
+
+  async getRanklist (contest: Types.ObjectId, isJury: boolean) {
+    return await this.cache.getOrCreate<ContestRanklist>(
+      CacheKey.contestRanklist(contest, isJury),
+
+      async () => {
+        const contestDoc = await Contest
+          .findById(contest)
+          .select({ _id: 1, endsAt: 1, scoreboardFrozenAt: 1, scoreboardUnfrozenAt: 1, problems: 1 })
+          .lean()
+        if (!contestDoc) {
+          return []
+        }
+
+        const { _id, endsAt, scoreboardFrozenAt, scoreboardUnfrozenAt } = contestDoc
+        const ranklistRecord: Record<string, Record<number, ContestRanklistProblem>> = {}
+        const problems = await Problem
+          .find({ _id: { $in: contestDoc.problems }, deletedAt: null })
+          .select({ _id: 1, pid: 1 })
+          .lean()
+        const problemIdByProblem = new Map(problems.map(problem => [ problem._id.toString(), problem.pid ]))
+        const solutions = await Solution
+          .find({
+            contest: _id,
+            problem: { $in: problems.map(problem => problem._id) },
+            judge: { $nin: ignoredJudges },
+            createdAt: { $lt: endsAt },
+          })
+          .select({ _id: 0, problem: 1, user: 1, judge: 1, createdAt: 1 })
+          .sort({ createdAt: 1 })
+          .lean()
+
+        const isFrozen = (scoreboardFrozenAt && !isJury)
+          && (!scoreboardUnfrozenAt || scoreboardUnfrozenAt > new Date())
+
+        solutions.forEach((solution) => {
+          const { problem, judge: judgement, createdAt } = solution
+          const problemId = problemIdByProblem.get(problem.toString())!
+          const userId = solution.user.toString()
+
+          if (!ranklistRecord[userId]) {
+            ranklistRecord[userId] = {}
+          }
+          const userRecord = ranklistRecord[userId]
+
+          if (!userRecord[problemId]) {
+            userRecord[problemId] = { problemId, failedCount: 0, pendingCount: 0 }
+          }
+          const item = userRecord[problemId]
+
+          if (item.solvedAt) {
+            // already solved, ignore subsequent submissions
+            return
+          }
+
+          if (isFrozen && createdAt >= scoreboardFrozenAt) {
+            // scoreboard is frozen, and the submission is after the freeze time, count it as pending
+            item.pendingCount += 1
+            return
+          }
+
+          if (pendingJudges.includes(judgement)) {
+            item.pendingCount += 1
+            return
+          }
+
+          if (judgement === JudgeStatus.Accepted) {
+            item.solvedAt = createdAt.toISOString()
+            return
+          }
+
+          item.failedCount += 1
+        })
+
+        const users = await User
+          .find({ _id: { $in: Object.keys(ranklistRecord) } })
+          .select({ _id: 1, uid: 1, nick: 1 })
+          .lean()
+        const userMap = new Map(users.map(user => [ user._id.toString(), user ]))
+
+        return Object.entries(ranklistRecord).map(([ userId, problems ]) => {
+          const user = userMap.get(userId)
+          const username = user?.uid ?? 'ghost'
+
+          return {
+            username,
+            nickname: user?.nick || username,
+            problems: Object.values(problems),
+          }
+        })
+      },
+
+      // Frontend's auto-refresh interval is 10s,
+      // so the cache TTL is set a bit shorter.
+      9,
+    )
+  }
+}
+decorate([ Injectable() ], ContestService)
+injectCtor(ContestService, [ CacheService ])

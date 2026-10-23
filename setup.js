@@ -25,7 +25,7 @@ async function main () {
 
   apps.push({
     name: 'app',
-    script: resolve(serverDistDir, 'app.js'),
+    script: resolve(serverDistDir, 'main.js'),
     out_file: resolve(logsDir, 'app.out.log'),
     error_file: resolve(logsDir, 'app.err.log'),
     ...commons,

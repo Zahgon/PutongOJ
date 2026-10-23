@@ -1,0 +1,219 @@
+import { Discussion } from '@putong-oj/db'
+import test from 'ava'
+import { agent, encryptData } from '../../e2e.ts'
+import { userSeeds } from '../../seeds/user.ts'
+
+const request = agent()
+
+const user = userSeeds.primaryuser
+
+async function getDiscussionIdByTitle (title: string) {
+  const discussion = await Discussion.findOne({ title }).select({ _id: 1 }).lean()
+  if (!discussion) {
+    throw new Error(`Discussion not found: ${title}`)
+  }
+  return discussion._id.toString()
+}
+
+test.before('Login', async (t) => {
+  const login = await request
+    .post('/api/account/login')
+    .send({
+      username: user.uid,
+      password: await encryptData(user.pwd!),
+    })
+
+  t.is(login.status, 200)
+})
+
+test('List discussions - logged in user sees more', async (t) => {
+  const res = await request
+    .get('/api/discussions')
+
+  t.is(res.status, 200)
+  t.truthy(res.body.data)
+  t.truthy(Array.isArray(res.body.data.docs))
+
+  // User should see public discussions and their own private ones
+  for (const doc of res.body.data.docs) {
+    t.truthy(doc.id)
+    t.truthy(doc.title)
+  }
+})
+
+test('Can access own private discussion', async (t) => {
+  const discussionId = await getDiscussionIdByTitle('Private Question')
+  const res = await request
+    .get(`/api/discussions/${discussionId}`)
+
+  t.is(res.status, 200)
+  t.is(res.body.data.id, discussionId)
+  t.truthy(res.body.data.title)
+})
+
+test('Cannot create open discussion as normal user', async (t) => {
+  // Note: Current implementation requires admin/managed status for all public discussion types
+  const res = await request
+    .post('/api/discussions')
+    .send({
+      type: 1, // OpenDiscussion
+      title: 'Test Discussion from User',
+      content: 'This is a test discussion content',
+    })
+
+  t.is(res.status, 200)
+  t.is(res.body.success, false)
+  t.is(res.body.code, 403)
+})
+
+test('Create private clarification', async (t) => {
+  const res = await request
+    .post('/api/discussions')
+    .send({
+      type: 3, // PrivateClarification
+      title: 'Private Question',
+      content: 'This is a private question',
+    })
+
+  t.is(res.status, 200)
+  t.truthy(res.body.data.id)
+})
+
+test('Cannot create discussion with problem reference as normal user', async (t) => {
+  // Note: Current implementation requires admin/managed status for OpenDiscussion type
+  const res = await request
+    .post('/api/discussions')
+    .send({
+      type: 1, // OpenDiscussion
+      title: 'Question about Problem 1000',
+      problem: 1000,
+      content: 'I have a question about this problem',
+    })
+
+  t.is(res.status, 200)
+  t.is(res.body.success, false)
+  t.is(res.body.code, 403)
+})
+
+test('Cannot create public announcement as normal user', async (t) => {
+  const res = await request
+    .post('/api/discussions')
+    .send({
+      type: 2, // PublicAnnouncement
+      title: 'Trying to create announcement',
+      content: 'Should fail',
+    })
+
+  t.is(res.status, 200)
+  t.is(res.body.success, false)
+  t.is(res.body.code, 403)
+})
+
+test('Create discussion with missing title', async (t) => {
+  const res = await request
+    .post('/api/discussions')
+    .send({
+      type: 1,
+      content: 'Content without title',
+    })
+
+  t.is(res.status, 200)
+  t.is(res.body.success, false)
+  t.is(res.body.code, 400)
+})
+
+test('Create discussion with missing content', async (t) => {
+  const res = await request
+    .post('/api/discussions')
+    .send({
+      type: 1,
+      title: 'Title without content',
+    })
+
+  t.is(res.status, 200)
+  t.is(res.body.success, false)
+  t.is(res.body.code, 400)
+})
+
+test('Add comment to open discussion', async (t) => {
+  const discussionId = await getDiscussionIdByTitle('Welcome to the OJ Discussion Board')
+  const res = await request
+    .post(`/api/discussions/${discussionId}/comments`)
+    .send({
+      content: 'This is a test comment',
+    })
+
+  t.is(res.status, 200)
+
+  // Verify comment was added
+  const getRes = await request
+    .get(`/api/discussions/${discussionId}`)
+
+  t.is(getRes.status, 200)
+  const comments = getRes.body.data.comments
+  const lastComment = comments.at(-1)
+  t.is(lastComment.content, 'This is a test comment')
+  t.is(lastComment.author.uid, user.uid)
+})
+
+test('Cannot add comment to announcement as normal user', async (t) => {
+  const discussionId = await getDiscussionIdByTitle('Important System Update')
+  const res = await request
+    .post(`/api/discussions/${discussionId}/comments`)
+    .send({
+      content: 'Trying to comment on announcement',
+    })
+
+  t.is(res.status, 200)
+  t.is(res.body.success, false)
+  t.is(res.body.code, 403)
+})
+
+test('Add comment with missing content', async (t) => {
+  const discussionId = await getDiscussionIdByTitle('Welcome to the OJ Discussion Board')
+  const res = await request
+    .post(`/api/discussions/${discussionId}/comments`)
+    .send({})
+
+  t.is(res.status, 200)
+  t.is(res.body.success, false)
+  t.is(res.body.code, 400)
+})
+
+test('Add comment to non-existent discussion', async (t) => {
+  const res = await request
+    .post('/api/discussions/000000000000000000000000/comments')
+    .send({
+      content: 'Comment on non-existent discussion',
+    })
+
+  t.is(res.status, 200)
+  t.is(res.body.success, false)
+  t.is(res.body.code, 404)
+})
+
+test('Filter discussions by type', async (t) => {
+  const res = await request
+    .get('/api/discussions')
+    .query({ type: 1 }) // OpenDiscussion only
+
+  t.is(res.status, 200)
+  t.truthy(res.body.data)
+
+  for (const doc of res.body.data.docs) {
+    t.is(doc.type, 1)
+  }
+})
+
+test('Filter discussions by author', async (t) => {
+  const res = await request
+    .get('/api/discussions')
+    .query({ author: 'admin' })
+
+  t.is(res.status, 200)
+  t.truthy(res.body.data)
+
+  for (const doc of res.body.data.docs) {
+    t.is(doc.author.uid, 'admin')
+  }
+})

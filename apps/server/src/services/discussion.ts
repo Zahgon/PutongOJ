@@ -12,7 +12,6 @@ import type {
 import type { PaginateOption, SortOption } from '../types/index.ts'
 import type { QueryFilter } from '../types/mongo.ts'
 import { Comment, Discussion } from '@putong-oj/db'
-import { distributeWork } from './taskQueue.ts'
 
 export type DiscussionQueryFilters = QueryFilter<{
   author: Types.ObjectId
@@ -166,7 +165,6 @@ export async function createComment (
   const { author, content } = comment
   const newComment = new Comment({ discussion, author, content })
   await newComment.save()
-  await distributeWork('updateStatistic', `discussion:${discussion.toString()}`)
   return newComment.toObject({ virtuals: true })
 }
 

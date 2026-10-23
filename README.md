@@ -23,7 +23,7 @@ Putong OJ is an online judge system designed for competitive programming and alg
 
 - **One-Click Deployment** – Easily deploy with Docker.
 - **Modern Web Interface** – Built as a single-page application (SPA) using Vue.js.
-- **Scalable Architecture** – Backed by Koa.js, MongoDB, and Redis for optimal performance.
+- **Scalable Architecture** – Backed by NestJS, MongoDB, and Redis for optimal performance.
 - **Multiple Testcases Support** – Run and evaluate submissions with multiple testcases.
 - **Flexible Judging System** – Supports various programming languages.
 - **Real-Time Status Updates** – Monitor submissions and results dynamically.
@@ -140,7 +140,7 @@ To retain data across container restarts, mount the following volumes:
 
 The backend is split into independently built applications:
 
-- [`apps/server`](apps/server) provides the Koa HTTP API and the notification WebSocket stream.
+- [`apps/server`](apps/server) provides the NestJS HTTP API and the notification WebSocket stream.
 - [`apps/worker`](apps/worker/README.md) runs asynchronous maintenance jobs.
 - [`apps/judger`](apps/judger/README.md) judges submissions with the go-judge sandbox.
 

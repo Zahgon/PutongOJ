@@ -1,0 +1,34 @@
+import { JudgeStatus } from '@putong-oj/shared'
+import test from 'ava'
+import { agent, deploy, encryptData } from '../../e2e.ts'
+
+const request = agent()
+
+test.before('Login', async (t) => {
+  const login = await request
+    .post('/api/account/login')
+    .send({
+      username: 'admin',
+      password: await encryptData(deploy.adminInitPwd),
+    })
+
+  t.is(login.status, 200)
+})
+
+test('Can see solution and similarity of other users', async (t) => {
+  const res = await request
+    .get('/api/status/4')
+
+  t.is(res.status, 200)
+  t.truthy(res.body.data.similarity)
+  t.truthy(res.body.data.simSolution?.sid)
+  t.truthy(res.body.data.code)
+})
+
+test('Push solution to rejudge', async (t) => {
+  const res = await request
+    .put('/api/status/3')
+    .send({ judge: JudgeStatus.RejudgePending })
+
+  t.is(res.status, 200)
+})

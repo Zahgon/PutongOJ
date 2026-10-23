@@ -1,5 +1,5 @@
 import type { CourseEntity } from '@putong-oj/shared'
-import { encrypt } from '../../src/utils/constants.ts'
+import { encrypt } from '../constants.ts'
 
 const courseSeeds: Partial<CourseEntity>[] = [
   {

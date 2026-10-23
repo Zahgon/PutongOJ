@@ -1,0 +1,339 @@
+import { Contest, Problem, Solution, User } from '@putong-oj/db'
+import { Language } from '@putong-oj/shared'
+import test from 'ava'
+import { agent, deploy, encryptData } from '../../e2e.ts'
+import { userSeeds } from '../../seeds/user.ts'
+
+const request = agent()
+const adminRequest = agent()
+
+let sid = null
+let contestId: number | null = null
+let futureContestId: number | null = null
+let endedContestId: number | null = null
+
+test.before(async (t) => {
+  const adminLogin = await adminRequest
+    .post('/api/account/login')
+    .send({
+      username: 'admin',
+      password: await encryptData(deploy.adminInitPwd),
+    })
+  t.is(adminLogin.status, 200)
+
+  const res = await request
+    .post('/api/account/login')
+    .send({
+      username: 'primaryuser',
+      password: await encryptData(userSeeds.primaryuser.pwd!),
+    })
+  t.is(res.status, 200)
+
+  const createdContest = await adminRequest
+    .post('/api/contests')
+    .send({
+      title: 'Solution Submit Contest',
+      startsAt: new Date(Date.now() - 60_000).toISOString(),
+      endsAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+      isHidden: false,
+      isPublic: true,
+    })
+  t.is(createdContest.status, 200)
+  t.true(createdContest.body.success)
+  contestId = createdContest.body.data.contestId
+
+  const updatedContest = await adminRequest
+    .put(`/api/contests/${contestId}/configs`)
+    .send({ problems: [ 1000 ] })
+  t.is(updatedContest.status, 200)
+  t.true(updatedContest.body.success)
+
+  const createdFutureContest = await adminRequest
+    .post('/api/contests')
+    .send({
+      title: 'Solution Future Contest',
+      startsAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+      endsAt: new Date(Date.now() + 2 * 60 * 60_000).toISOString(),
+      isHidden: false,
+      isPublic: true,
+    })
+  t.is(createdFutureContest.status, 200)
+  t.true(createdFutureContest.body.success)
+  futureContestId = createdFutureContest.body.data.contestId
+
+  const updatedFutureContest = await adminRequest
+    .put(`/api/contests/${futureContestId}/configs`)
+    .send({ problems: [ 1000 ] })
+  t.is(updatedFutureContest.status, 200)
+  t.true(updatedFutureContest.body.success)
+
+  const createdEndedContest = await adminRequest
+    .post('/api/contests')
+    .send({
+      title: 'Solution Ended Contest',
+      startsAt: new Date(Date.now() - 2 * 60 * 60_000).toISOString(),
+      endsAt: new Date(Date.now() - 60 * 60_000).toISOString(),
+      isHidden: false,
+      isPublic: true,
+    })
+  t.is(createdEndedContest.status, 200)
+  t.true(createdEndedContest.body.success)
+  endedContestId = createdEndedContest.body.data.contestId
+
+  const updatedEndedContest = await adminRequest
+    .put(`/api/contests/${endedContestId}/configs`)
+    .send({ problems: [ 1000 ] })
+  t.is(updatedEndedContest.status, 200)
+  t.true(updatedEndedContest.body.success)
+
+  const participate = await request
+    .post(`/api/contests/${contestId}/participation`)
+    .send({})
+  t.is(participate.status, 200)
+  t.true(participate.body.success)
+
+  const participateFuture = await request
+    .post(`/api/contests/${futureContestId}/participation`)
+    .send({})
+  t.is(participateFuture.status, 200)
+  t.true(participateFuture.body.success)
+
+  const participateEnded = await request
+    .post(`/api/contests/${endedContestId}/participation`)
+    .send({})
+  t.is(participateEnded.status, 200)
+  t.true(participateEnded.body.success)
+})
+
+test.serial('Submit a solution', async (t) => {
+  const code = `
+    #include <iostream>
+
+    using namespace std;
+
+    int main () {
+      return 0;
+    }
+  `
+  let res = await request
+    .post('/api/status/')
+    .send({
+      problem: 1000,
+      code,
+      language: Language.Cpp17,
+    })
+
+  t.is(res.status, 200)
+  t.true(res.body.success)
+  sid = res.body.data.sid
+
+  res = await request.get(`/api/status/${sid}`)
+
+  t.is(res.status, 200)
+  t.is(res.body.data.code, code)
+
+  const solution = await Solution.findOne({ sid }).lean()
+  const problem = await Problem.findOne({ pid: 1000 }).select('_id').lean()
+  const user = await User.findOne({ uid: userSeeds.primaryuser.uid }).select('_id').lean()
+  t.true(solution?.problem.equals(problem?._id))
+  t.true(solution?.user.equals(user?._id))
+  t.false(Object.hasOwn(solution ?? {}, 'pid'))
+  t.false(Object.hasOwn(solution ?? {}, 'uid'))
+})
+
+test('Status fails to find one', async (t) => {
+  const res = await request
+    .get('/api/status/87654321')
+
+  t.is(res.status, 200)
+  t.is(res.body.success, false)
+  t.is(res.body.code, 400)
+})
+
+test('Status fails to delete', async (t) => {
+  const res = await request
+    .del('/api/status/1000')
+
+  t.is(res.status, 405)
+})
+
+test('Status fails to update', async (t) => {
+  const res = await request
+    .put('/api/status/1000')
+
+  t.is(res.status, 200)
+  t.is(res.body.success, false)
+  t.is(res.body.code, 403)
+})
+
+test('Can not see solution of another user', async (t) => {
+  const res = await request
+    .get('/api/status/1')
+
+  t.is(res.status, 200)
+  t.is(res.body.success, false)
+  t.is(res.body.code, 403)
+})
+
+test('Code is too long', async (t) => {
+  const code = `
+    #include <iostream>
+
+    using namespace std;
+
+    int main () {
+      "${'a'.repeat(20000)}";
+      return 0;
+    }
+  `
+  const res = await request
+    .post('/api/status/')
+    .send({
+      problem: 1000,
+      code,
+      language: Language.Cpp17,
+    })
+
+  t.is(res.status, 200)
+  t.is(res.body.success, false)
+  t.is(res.body.code, 400)
+})
+
+test('Code is too short', async (t) => {
+  const code = '1;'
+  const res = await request
+    .post('/api/status/')
+    .send({
+      problem: 1000,
+      code,
+      language: Language.Cpp17,
+    })
+
+  t.is(res.status, 200)
+  t.is(res.body.success, false)
+  t.is(res.body.code, 400)
+})
+
+test.serial('Contest submission rejects disallowed language', async (t) => {
+  if (!contestId) {
+    return t.fail('No contestId from setup')
+  }
+
+  const configRes = await adminRequest
+    .put(`/api/contests/${contestId}/configs`)
+    .send({ allowedLanguages: [ Language.Cpp17 ] })
+
+  t.is(configRes.status, 200)
+  t.true(configRes.body.success)
+
+  const javaCode = `
+    public class Main {
+      public static void main(String[] args) {
+        System.out.println(0);
+      }
+    }
+  `
+
+  const res = await request
+    .post('/api/status/')
+    .send({
+      problem: 1000,
+      contest: contestId,
+      code: javaCode,
+      language: Language.Java,
+    })
+
+  t.is(res.status, 200)
+  t.false(res.body.success)
+  t.is(res.body.code, 400)
+})
+
+test.serial('Contest submission accepts allowed language', async (t) => {
+  if (!contestId) {
+    return t.fail('No contestId from setup')
+  }
+
+  const code = `
+    #include <iostream>
+
+    int main() {
+      std::cout << 0 << std::endl;
+      return 0;
+    }
+  `
+
+  const res = await request
+    .post('/api/status/')
+    .send({
+      problem: 1000,
+      contest: contestId,
+      code,
+      language: Language.Cpp17,
+    })
+
+  t.is(res.status, 200)
+  t.true(res.body.success)
+
+  const solution = await Solution.findOne({ sid: res.body.data.sid }).lean()
+  const contest = await Contest.findOne({ contestId }).select('_id').lean()
+  t.true(solution?.contest?.equals(contest?._id))
+  t.false(Object.hasOwn(solution, 'mid'))
+})
+
+test.serial('Contest submission is rejected before the contest starts', async (t) => {
+  if (!futureContestId) {
+    return t.fail('No futureContestId from setup')
+  }
+
+  const code = `
+    #include <iostream>
+
+    int main() {
+      std::cout << 0 << std::endl;
+      return 0;
+    }
+  `
+
+  const res = await request
+    .post('/api/status/')
+    .send({
+      problem: 1000,
+      contest: futureContestId,
+      code,
+      language: Language.Cpp17,
+    })
+
+  t.is(res.status, 200)
+  t.false(res.body.success)
+  t.is(res.body.code, 403)
+  t.is(res.body.message, 'Permission denied')
+})
+
+test.serial('Contest submission is rejected after the contest ends', async (t) => {
+  if (!endedContestId) {
+    return t.fail('No endedContestId from setup')
+  }
+
+  const code = `
+    #include <iostream>
+
+    int main() {
+      std::cout << 0 << std::endl;
+      return 0;
+    }
+  `
+
+  const res = await request
+    .post('/api/status/')
+    .send({
+      problem: 1000,
+      contest: endedContestId,
+      code,
+      language: Language.Cpp17,
+    })
+
+  t.is(res.status, 200)
+  t.false(res.body.success)
+  t.is(res.body.code, 400)
+  t.is(res.body.message, 'Contest is ended!')
+})

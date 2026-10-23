@@ -10,9 +10,9 @@ import type {
 } from '@putong-oj/shared'
 import type { CourseRole, PaginateOption } from '../types/index.ts'
 import { Course, CourseMember, CourseProblem, mongoose, User } from '@putong-oj/db'
+import { courseRoleEntire, courseRoleNone, encrypt } from '@putong-oj/shared'
 import escapeRegExp from 'lodash/escapeRegExp.js'
 import omit from 'lodash/omit.js'
-import { courseRoleEntire, courseRoleNone, encrypt } from '../utils/constants.ts'
 
 export async function findCourses (
   opt: PaginateOption & { keyword?: string },
@@ -210,10 +210,7 @@ export async function getUserRole (
       if (userPerm) {
         role = Object.assign(role, userPerm.role)
       } else if (course.encrypt === encrypt.Public) {
-        /**
-         * @todo a temporary solution to make sure the basic role is granted to public course visitors,
-         * may consider introducing a new course join mechanism, instead of auto joining at first visit.
-         */
+        // A first visit to a public course grants its basic role.
         await updateCourseMember(course._id, profile._id, { ...courseRoleNone, basic: true })
       }
     }

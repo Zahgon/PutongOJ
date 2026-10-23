@@ -1,4 +1,4 @@
-import constants from '../../src/utils/constants.ts'
+import constants from '../constants.ts'
 
 const { status } = constants
 
